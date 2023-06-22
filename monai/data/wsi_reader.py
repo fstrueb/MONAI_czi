@@ -34,42 +34,24 @@ from monai.utils import (
 )
 from monai.utils.misc import ConvertUnits
 
+CuImage, _ = optional_import("cucim", name="CuImage")
 OpenSlide, _ = optional_import("openslide", name="OpenSlide")
 TiffFile, _ = optional_import("tifffile", name="TiffFile")
+ZeissCZI, _ = optional_import("pylibCZIrw", name="pylibCZIrw")
 
-__all__ = ["BaseWSIReader", "WSIReader", "CuCIMWSIReader", "OpenSlideWSIReader", "TiffFileWSIReader"]
+__all__ = ["BaseWSIReader", "WSIReader", "CuCIMWSIReader", "OpenSlideWSIReader", "TiffFileWSIReader","ZeissCZIWSIReader"]
 
 
 class BaseWSIReader(ImageReader):
     """
     An abstract class that defines APIs to load patches from whole slide image files.
 
-    Args:
-        level: the whole slide image level at which the patches are extracted.
-        mpp: the resolution in micron per pixel at which the patches are extracted.
-        mpp_rtol: the acceptable relative tolerance for resolution in micro per pixel.
-        mpp_atol: the acceptable absolute tolerance for resolution in micro per pixel.
-        power: the objective power at which the patches are extracted.
-        power_rtol: the acceptable relative tolerance for objective power.
-        power_atol: the acceptable absolute tolerance for objective power.
-        channel_dim: the desired dimension for color channel.
-        dtype: the data type of output image.
-        device: target device to put the extracted patch. Note that if device is "cuda"",
-            the output will be converted to torch tenor and sent to the gpu even if the dtype is numpy.
-        mode: the output image color mode, e.g., "RGB" or "RGBA".
-        kwargs: additional args for the reader
-
-        Notes:
-            Only one of resolution parameters, `level`, `mpp`, or `power`, should be provided.
-            If such parameters are provided in `get_data` method, those will override the values provided here.
-            If none of them are provided here or in `get_data`, `level=0` will be used.
-
     Typical usage of a concrete implementation of this class is:
 
     .. code-block:: python
 
         image_reader = MyWSIReader()
-        wsi = image_reader.read(filepath, **kwargs)
+        wsi = image_reader.read(, **kwargs)
         img_data, meta_data = image_reader.get_data(wsi)
 
     - The `read` call converts an image filename into whole slide image object,
@@ -86,133 +68,28 @@ class BaseWSIReader(ImageReader):
 
     """
 
-    supported_suffixes: list[str] = []
+    supported_suffixes: List[str] = []
     backend = ""
 
-    def __init__(
-        self,
-        level: int | None = None,
-        mpp: float | tuple[float, float] | None = None,
-        mpp_rtol: float = 0.05,
-        mpp_atol: float = 0.0,
-        power: int | None = None,
-        power_rtol: float = 0.05,
-        power_atol: float = 0.0,
-        channel_dim: int = 0,
-        dtype: DtypeLike | torch.dtype = np.uint8,
-        device: torch.device | str | None = None,
-        mode: str = "RGB",
-        **kwargs,
-    ):
+    def __init__(self, level: int = 0, channel_dim: int = 0, **kwargs):
         super().__init__()
         self.level = level
         self.channel_dim = channel_dim
-        self.set_dtype(dtype)
-        self.set_device(device)
-        self.mode = mode
         self.kwargs = kwargs
-        self.mpp: tuple[float, float] | None = ensure_tuple_rep(mpp, 2) if mpp is not None else None  # type: ignore
-        self.power = power
-        self.mpp_rtol = mpp_rtol
-        self.mpp_atol = mpp_atol
-        self.power_rtol = power_rtol
-        self.power_atol = power_atol
-        self.metadata: dict[Any, Any] = {}
-
-    def set_dtype(self, dtype):
-        self.dtype: torch.dtype | np.dtype
-        if isinstance(dtype, torch.dtype):
-            self.dtype = dtype
-        else:
-            self.dtype = np.dtype(dtype)
-
-    def set_device(self, device):
-        if device is None or isinstance(device, (torch.device, str)):
-            self.device = device
-        else:
-            raise ValueError(f"`device` must be `torch.device`, `str` or `None` but {type(device)} is given.")
+        self.metadata: Dict[Any, Any] = {}
 
     @abstractmethod
-    def get_size(self, wsi, level: int) -> tuple[int, int]:
+    def get_size(self, wsi, level: Optional[int] = None) -> Tuple[int, int]:
         """
         Returns the size (height, width) of the whole slide image at a given level.
 
         Args:
-            wsi: a whole slide image object loaded from a file.
-            level: the level number where the size is calculated.
+            wsi: a whole slide image object loaded from a file
+            level: the level number where the size is calculated
 
         """
         raise NotImplementedError(f"Subclass {self.__class__.__name__} must implement this method.")
 
-    def _find_closest_level(
-        self, name: str, value: tuple, value_at_levels: Sequence[tuple], atol: float, rtol: float
-    ) -> int:
-        """Find the level corresponding to the value of the quantity in the list of values at each level.
-        Args:
-            name: the name of the requested quantity
-            value: the value of requested quantity
-            value_at_levels: list of value of the quantity at each level
-            atol: the tolerance for the value
-            rtol: relative tolerance for the value
-        """
-        if value in value_at_levels:
-            return value_at_levels.index(value)
-
-        closest_value = min(value_at_levels, key=lambda a_value: sum([abs(x - y) for x, y in zip(a_value, value)]))  # type: ignore
-        for i in range(len(value)):
-            if abs(closest_value[i] - value[i]) > atol + rtol * abs(value[i]):
-                raise ValueError(
-                    f"The requested {name} < {value} > does not exist in this whole slide image "
-                    f"(with {name}_rtol={rtol} and {name}_atol={atol}). "
-                    f"Here is the list of available {name}: {value_at_levels}. "
-                    f"The closest matching available {name} is {closest_value}."
-                    f"Please consider changing the tolerances or use another {name}."
-                )
-        return value_at_levels.index(closest_value)
-
-    def get_valid_level(
-        self, wsi, level: int | None, mpp: float | tuple[float, float] | None, power: int | None
-    ) -> int:
-        """
-        Returns the level associated to the resolution parameters in the whole slide image.
-
-        Args:
-            wsi: a whole slide image object loaded from a file.
-            level: the level number.
-            mpp: the micron-per-pixel resolution.
-            power: the objective power.
-
-        """
-
-        # Try instance parameters if no resolution is provided
-        if mpp is None and power is None and level is None:
-            mpp = self.mpp
-            power = self.power
-            level = self.level
-
-        # Ensure that at most one resolution parameter is provided.
-        resolution = [val[0] for val in [("level", level), ("mpp", mpp), ("power", power)] if val[1] is not None]
-        if len(resolution) > 1:
-            raise ValueError(f"Only one of `level`, `mpp`, or `power` should be provided. {resolution} are provided.")
-
-        n_levels = self.get_level_count(wsi)
-
-        if mpp is not None:
-            mpp_ = ensure_tuple_rep(mpp, 2)
-            available_mpps = [self.get_mpp(wsi, level) for level in range(n_levels)]
-            level = self._find_closest_level("mpp", mpp_, available_mpps, self.mpp_atol, self.mpp_rtol)
-        elif power is not None:
-            power_ = ensure_tuple(power)
-            available_powers = [(self.get_power(wsi, level),) for level in range(n_levels)]
-            level = self._find_closest_level("power", power_, available_powers, self.power_atol, self.power_rtol)
-        else:
-            if level is None:
-                # Set the default value if no resolution parameter is provided.
-                level = 0
-            if level >= n_levels:
-                raise ValueError(f"The maximum level of this image is {n_levels-1} while level={level} is requested)!")
-
-        return level
 
     @abstractmethod
     def get_level_count(self, wsi) -> int:
@@ -220,55 +97,48 @@ class BaseWSIReader(ImageReader):
         Returns the number of levels in the whole slide image.
 
         Args:
-            wsi: a whole slide image object loaded from a file.
+            wsi: a whole slide image object loaded from a file
 
         """
         raise NotImplementedError(f"Subclass {self.__class__.__name__} must implement this method.")
 
+
     @abstractmethod
-    def get_downsample_ratio(self, wsi, level: int) -> float:
+    def get_downsample_ratio(self, wsi, level: Optional[int] = None) -> float:
         """
         Returns the down-sampling ratio of the whole slide image at a given level.
 
         Args:
-            wsi: a whole slide image object loaded from a file.
-            level: the level number where the downsample ratio is calculated.
+            wsi: a whole slide image object loaded from a file
+            level: the level number where the size is calculated. If not provided the default level (from `self.level`)
+                will be used.
 
         """
         raise NotImplementedError(f"Subclass {self.__class__.__name__} must implement this method.")
+
 
     @abstractmethod
     def get_file_path(self, wsi) -> str:
         """Return the file path for the WSI object"""
         raise NotImplementedError(f"Subclass {self.__class__.__name__} must implement this method.")
 
+
     @abstractmethod
-    def get_mpp(self, wsi, level: int) -> tuple[float, float]:
+    def get_mpp(self, wsi, level: Optional[int] = None) -> Tuple[float, float]:
         """
         Returns the micro-per-pixel resolution of the whole slide image at a given level.
 
         Args:
-            wsi: a whole slide image object loaded from a file.
-            level: the level number where the mpp is calculated.
+            wsi: a whole slide image object loaded from a file
+            level: the level number where the size is calculated
 
         """
         raise NotImplementedError(f"Subclass {self.__class__.__name__} must implement this method.")
 
-    @abstractmethod
-    def get_power(self, wsi, level: int) -> float:
-        """
-        Returns the objective power of the whole slide image at a given level.
-
-        Args:
-            wsi: a whole slide image object loaded from a file.
-            level: the level number where the objective power is calculated.
-
-        """
-        raise NotImplementedError(f"Subclass {self.__class__.__name__} must implement this method.")
 
     @abstractmethod
     def _get_patch(
-        self, wsi, location: tuple[int, int], size: tuple[int, int], level: int, dtype: DtypeLike, mode: str
+        self, wsi, location: Tuple[int, int], size: Tuple[int, int], level: int, dtype: DtypeLike, mode: str
     ) -> np.ndarray:
         """
         Extracts and returns a patch image form the whole slide image.
@@ -278,26 +148,26 @@ class BaseWSIReader(ImageReader):
             location: (top, left) tuple giving the top left pixel in the level 0 reference frame. Defaults to (0, 0).
             size: (height, width) tuple giving the patch size at the given level (`level`).
                 If None, it is set to the full image size at the given level.
-            level: the level number.
-            dtype: the data type of output image.
-            mode: the output image mode, 'RGB' or 'RGBA'.
+            level: the level number. Defaults to 0
+            dtype: the data type of output image
+            mode: the output image mode, 'RGB' or 'RGBA'
 
         """
         raise NotImplementedError(f"Subclass {self.__class__.__name__} must implement this method.")
 
     def _get_metadata(
-        self, wsi, patch: NdarrayOrTensor, location: tuple[int, int], size: tuple[int, int], level: int
-    ) -> dict:
+        self, wsi, patch: np.ndarray, location: Tuple[int, int], size: Tuple[int, int], level: int
+    ) -> Dict:
         """
         Returns metadata of the extracted patch from the whole slide image.
 
         Args:
-            wsi: the whole slide image object, from which the patch is loaded.
-            patch: extracted patch from whole slide image.
+            wsi: the whole slide image object, from which the patch is loaded
+            patch: extracted patch from whole slide image
             location: (top, left) tuple giving the top left pixel in the level 0 reference frame. Defaults to (0, 0).
             size: (height, width) tuple giving the patch size at the given level (`level`).
                 If None, it is set to the full image size at the given level.
-            level: the level number.
+            level: the level number. Defaults to 0
 
         """
         if self.channel_dim >= len(patch.shape) or self.channel_dim < -len(patch.shape):
@@ -305,7 +175,7 @@ class BaseWSIReader(ImageReader):
                 f"The desired channel_dim ({self.channel_dim}) is out of bound for image shape: {patch.shape}"
             )
         channel_dim: int = self.channel_dim + (len(patch.shape) if self.channel_dim < 0 else 0)
-        metadata: dict = {
+        metadata: Dict = {
             "backend": self.backend,
             "original_channel_dim": channel_dim,
             "spatial_shape": np.array(patch.shape[:channel_dim] + patch.shape[channel_dim + 1 :]),
@@ -320,47 +190,40 @@ class BaseWSIReader(ImageReader):
     def get_data(
         self,
         wsi,
-        location: tuple[int, int] = (0, 0),
-        size: tuple[int, int] | None = None,
-        level: int | None = None,
-        mpp: float | tuple[float, float] | None = None,
-        power: int | None = None,
-        mode: str | None = None,
-    ) -> tuple[np.ndarray, dict]:
+        location: Tuple[int, int] = (0, 0),
+        size: Optional[Tuple[int, int]] = None,
+        level: Optional[int] = None,
+        dtype: DtypeLike = np.uint8,
+        mode: str = "RGB",  #adapt
+    ) -> Tuple[np.ndarray, Dict]:
         """
-        Verifies inputs, extracts patches from WSI image and generates metadata.
+        Verifies inputs, extracts patches from WSI image and generates metadata, and return them.
 
         Args:
-            wsi: a whole slide image object loaded from a file or a list of such objects.
+            wsi: a whole slide image object loaded from a file or a list of such objects
             location: (top, left) tuple giving the top left pixel in the level 0 reference frame. Defaults to (0, 0).
             size: (height, width) tuple giving the patch size at the given level (`level`).
-                If not provided or None, it is set to the full image size at the given level.
-            level: the whole slide image level at which the patches are extracted.
-            mpp: the resolution in micron per pixel at which the patches are extracted.
-            power: the objective power at which the patches are extracted.
-            dtype: the data type of output image.
-            mode: the output image mode, 'RGB' or 'RGBA'.
+                If None, it is set to the full image size at the given level.
+            level: the level number. Defaults to 0
+            dtype: the data type of output image
+            mode: the output image mode, 'RGB' or 'RGBA'
 
         Returns:
             a tuples, where the first element is an image patch [CxHxW] or stack of patches,
-                and second element is a dictionary of metadata.
-
-        Notes:
-            Only one of resolution parameters, `level`, `mpp`, or `power`, should be provided.
-            If none of them are provided, it uses the defaults that are set during class instantiation.
-            If none of them are set here or during class instantiation, `level=0` will be used.
+                and second element is a dictionary of metadata
         """
-        if mode is None:
-            mode = self.mode
-        patch_list: list = []
-        metadata_list: list = []
-
+        patch_list: List = []
+        metadata_list: List = []
         # CuImage object is iterable, so ensure_tuple won't work on single object
-        if not isinstance(wsi, (list, tuple)):
-            wsi = (wsi,)
+        if not isinstance(wsi, List):
+            wsi = [wsi]
         for each_wsi in ensure_tuple(wsi):
-            # get the valid level based on resolution info
-            level = self.get_valid_level(each_wsi, level, mpp, power)
+            # Verify magnification level
+            if level is None:
+                level = self.level
+            max_level = self.get_level_count(each_wsi) - 1
+            if level > max_level:
+                raise ValueError(f"The maximum level of this image is {max_level} while level={level} is requested)!")
 
             # Verify location
             if location is None:
@@ -378,25 +241,8 @@ class BaseWSIReader(ImageReader):
                 if size[0] <= 0 or size[1] <= 0:
                     raise ValueError(f"Patch size should be greater than zero, provided: patch size = {size}")
 
-            # Get numpy dtype if it is not already.
-            dtype_np = dtype_torch_to_numpy(self.dtype) if isinstance(self.dtype, torch.dtype) else self.dtype
             # Extract a patch or the entire image
-            patch: NdarrayOrTensor
-            patch = self._get_patch(each_wsi, location=location, size=size, level=level, dtype=dtype_np, mode=mode)
-
-            # Convert the patch to torch.Tensor if dtype is torch
-            if isinstance(self.dtype, torch.dtype) or (
-                self.device is not None and torch.device(self.device).type == "cuda"
-            ):
-                # Ensure dtype is torch.dtype if the device is not "cpu"
-                dtype_torch = (
-                    dtype_numpy_to_torch(self.dtype) if not isinstance(self.dtype, torch.dtype) else self.dtype
-                )
-                # Copy the numpy array if it is not writable
-                if patch.flags["WRITEABLE"]:
-                    patch = torch.as_tensor(patch, dtype=dtype_torch, device=self.device)
-                else:
-                    patch = torch.tensor(patch, dtype=dtype_torch, device=self.device)
+            patch = self._get_patch(each_wsi, location=location, size=size, level=level, dtype=dtype, mode=mode)
 
             # check if the image has three dimensions (2D + color)
             if patch.ndim != 3:
@@ -431,7 +277,8 @@ class BaseWSIReader(ImageReader):
                 metadata[key] = [m[key] for m in metadata_list]
         return _stack_images(patch_list, metadata), metadata
 
-    def verify_suffix(self, filename: Sequence[PathLike] | PathLike) -> bool:
+
+    def verify_suffix(self, filename: Union[Sequence[PathLike], PathLike]) -> bool:
         """
         Verify whether the specified file or files format is supported by WSI reader.
 
@@ -444,195 +291,125 @@ class BaseWSIReader(ImageReader):
         return is_supported_format(filename, self.supported_suffixes)
 
 
+
 class WSIReader(BaseWSIReader):
     """
     Read whole slide images and extract patches using different backend libraries
 
     Args:
         backend: the name of backend whole slide image reader library, the default is cuCIM.
-        level: the whole slide image level at which the patches are extracted.
-        mpp: the resolution in micron per pixel at which the patches are extracted.
-        mpp_rtol: the acceptable relative tolerance for resolution in micro per pixel.
-        mpp_atol: the acceptable absolute tolerance for resolution in micro per pixel.
-        power: the objective power at which the patches are extracted.
-        power_rtol: the acceptable relative tolerance for objective power.
-        power_atol: the acceptable absolute tolerance for objective power.
+        level: the level at which patches are extracted.
         channel_dim: the desired dimension for color channel. Default to 0 (channel first).
-        dtype: the data type of output image. Defaults to `np.uint8`.
-        device: target device to put the extracted patch. Note that if device is "cuda"",
-            the output will be converted to torch tenor and sent to the gpu even if the dtype is numpy.
-        mode: the output image color mode, "RGB" or "RGBA". Defaults to "RGB".
         num_workers: number of workers for multi-thread image loading (cucim backend only).
         kwargs: additional arguments to be passed to the backend library
 
-        Notes:
-            Only one of resolution parameters, `level`, `mpp`, or `power`, should be provided.
-            If such parameters are provided in `get_data` method, those will override the values provided here.
-            If none of them are provided here or in `get_data`, `level=0` will be used.
-
     """
 
-    supported_backends = ["cucim", "openslide", "tifffile"]
-
-    def __init__(
-        self,
-        backend="cucim",
-        level: int | None = None,
-        mpp: float | tuple[float, float] | None = None,
-        mpp_rtol: float = 0.05,
-        mpp_atol: float = 0.0,
-        power: int | None = None,
-        power_rtol: float = 0.05,
-        power_atol: float = 0.0,
-        channel_dim: int = 0,
-        dtype: DtypeLike | torch.dtype = np.uint8,
-        device: torch.device | str | None = None,
-        mode: str = "RGB",
-        **kwargs,
-    ):
+    def __init__(self, backend="cucim", level: int = 0, channel_dim: int = 0, **kwargs):
+        super().__init__(level, channel_dim, **kwargs)
         self.backend = backend.lower()
-        self.reader: CuCIMWSIReader | OpenSlideWSIReader | TiffFileWSIReader
+        self.reader: Union[CuCIMWSIReader, OpenSlideWSIReader, TiffFileWSIReader, ZeissCZIWSIReader]
         if self.backend == "cucim":
-            self.reader = CuCIMWSIReader(
-                level=level,
-                mpp=mpp,
-                mpp_rtol=mpp_rtol,
-                mpp_atol=mpp_atol,
-                power=power,
-                power_rtol=power_rtol,
-                power_atol=power_atol,
-                channel_dim=channel_dim,
-                dtype=dtype,
-                device=device,
-                mode=mode,
-                **kwargs,
-            )
+            self.reader = CuCIMWSIReader(level=level, channel_dim=channel_dim, **kwargs)
         elif self.backend == "openslide":
-            self.reader = OpenSlideWSIReader(
-                level=level,
-                mpp=mpp,
-                mpp_rtol=mpp_rtol,
-                mpp_atol=mpp_atol,
-                power=power,
-                power_rtol=power_rtol,
-                power_atol=power_atol,
-                channel_dim=channel_dim,
-                dtype=dtype,
-                device=device,
-                mode=mode,
-                **kwargs,
-            )
+            self.reader = OpenSlideWSIReader(level=level, channel_dim=channel_dim, **kwargs)
         elif self.backend == "tifffile":
-            self.reader = TiffFileWSIReader(
-                level=level,
-                mpp=mpp,
-                mpp_rtol=mpp_rtol,
-                mpp_atol=mpp_atol,
-                power=power,
-                power_rtol=power_rtol,
-                power_atol=power_atol,
-                channel_dim=channel_dim,
-                dtype=dtype,
-                device=device,
-                mode=mode,
-                **kwargs,
-            )
+            self.reader = TiffFileWSIReader(level=level, channel_dim=channel_dim, **kwargs)
+        elif self.backend == "pylibCZIrw":
+            self.reader = ZeissCZIWSIReader(level=level, channel_dim=channel_dim, **kwargs)
+        
         else:
             raise ValueError(
                 f"The supported backends are cucim, openslide, and tifffile but '{self.backend}' was given."
             )
         self.supported_suffixes = self.reader.supported_suffixes
-        self.level = self.reader.level
-        self.mpp_rtol = self.reader.mpp_rtol
-        self.mpp_atol = self.reader.mpp_atol
-        self.power = self.reader.power
-        self.power_rtol = self.reader.power_rtol
-        self.power_atol = self.reader.power_atol
-        self.channel_dim = self.reader.channel_dim
-        self.dtype = self.reader.dtype
-        self.device = self.reader.device
-        self.mode = self.reader.mode
-        self.kwargs = self.reader.kwargs
-        self.metadata = self.reader.metadata
-        self.mpp = self.reader.mpp
+        
+        
+        
 
     def get_level_count(self, wsi) -> int:
-        """
-        Returns the number of levels in the whole slide image.
+            """
+            Returns the number of levels in the whole slide image.
 
-        Args:
-            wsi: a whole slide image object loaded from a file.
+            Args:
+            wsi: a whole slide image object loaded from a file
 
-        """
-        return self.reader.get_level_count(wsi)
+            """
+            return self.reader.get_level_count(wsi)
 
-    def get_size(self, wsi, level: int) -> tuple[int, int]:
+
+    def get_size(self, wsi, level: Optional[int] = None) -> Tuple[int, int]:
         """
         Returns the size (height, width) of the whole slide image at a given level.
 
         Args:
-            wsi: a whole slide image object loaded from a file.
-            level: the level number where the size is calculated.
+            wsi: a whole slide image object loaded from a file
+            level: the level number where the size is calculated. If not provided the default level (from `self.level`)
+                will be used.
 
         """
+        if level is None:
+            level = self.level
+
         return self.reader.get_size(wsi, level)
 
-    def get_downsample_ratio(self, wsi, level: int) -> float:
+
+    def get_downsample_ratio(self, wsi, level: Optional[int] = None) -> float:
         """
         Returns the down-sampling ratio of the whole slide image at a given level.
 
         Args:
-            wsi: a whole slide image object loaded from a file.
-            level: the level number where the downsample ratio is calculated.
+            wsi: a whole slide image object loaded from a file
+            level: the level number where the size is calculated. If not provided the default level (from `self.level`)
+                will be used.
 
         """
+        if level is None:
+            level = self.level
+
         return self.reader.get_downsample_ratio(wsi, level)
+
 
     def get_file_path(self, wsi) -> str:
         """Return the file path for the WSI object"""
         return self.reader.get_file_path(wsi)
 
-    def get_mpp(self, wsi, level: int) -> tuple[float, float]:
+
+    def get_mpp(self, wsi, level: Optional[int] = None) -> Tuple[float, float]:
         """
         Returns the micro-per-pixel resolution of the whole slide image at a given level.
 
         Args:
-            wsi: a whole slide image object loaded from a file.
-            level: the level number where the mpp is calculated.
+            wsi: a whole slide image object loaded from a file
+            level: the level number where the size is calculated. If not provided the default level (from `self.level`)
+                will be used.
 
         """
+        if level is None:
+            level = self.level
+
         return self.reader.get_mpp(wsi, level)
 
-    def get_power(self, wsi, level: int) -> float:
-        """
-        Returns the micro-per-pixel resolution of the whole slide image at a given level.
-
-        Args:
-            wsi: a whole slide image object loaded from a file.
-            level: the level number where the objective power is calculated.
-
-        """
-        return self.reader.get_power(wsi, level)
 
     def _get_patch(
-        self, wsi, location: tuple[int, int], size: tuple[int, int], level: int, dtype: DtypeLike, mode: str
+        self, wsi, location: Tuple[int, int], size: Tuple[int, int], level: int, dtype: DtypeLike, mode: str
     ) -> np.ndarray:
         """
         Extracts and returns a patch image form the whole slide image.
 
         Args:
-            wsi: a whole slide image object loaded from a file or a lis of such objects.
+            wsi: a whole slide image object loaded from a file or a lis of such objects
             location: (top, left) tuple giving the top left pixel in the level 0 reference frame. Defaults to (0, 0).
             size: (height, width) tuple giving the patch size at the given level (`level`).
                 If None, it is set to the full image size at the given level.
-            level: the level number.
+            level: the level number. Defaults to 0
             dtype: the data type of output image
-            mode: the output image mode, 'RGB' or 'RGBA'.
+            mode: the output image mode, 'RGB' or 'RGBA'
 
         """
         return self.reader._get_patch(wsi=wsi, location=location, size=size, level=level, dtype=dtype, mode=mode)
 
-    def read(self, data: Sequence[PathLike] | PathLike | np.ndarray, **kwargs):
+    def read(self, data: Union[Sequence[PathLike], PathLike, np.ndarray], **kwargs):
         """
         Read whole slide image objects from given file or list of files.
 
@@ -641,10 +418,11 @@ class WSIReader(BaseWSIReader):
             kwargs: additional args for the reader module (overrides `self.kwargs` for existing keys).
 
         Returns:
-            whole slide image object or list of such objects.
+            whole slide image object or list of such objects
 
         """
         return self.reader.read(data=data, **kwargs)
+
 
 
 @require_pkg(pkg_name="cucim")
@@ -653,34 +431,20 @@ class CuCIMWSIReader(BaseWSIReader):
     Read whole slide images and extract patches using cuCIM library.
 
     Args:
-        level: the whole slide image level at which the patches are extracted.
-        mpp: the resolution in micron per pixel at which the patches are extracted.
-        mpp_rtol: the acceptable relative tolerance for resolution in micro per pixel.
-        mpp_atol: the acceptable absolute tolerance for resolution in micro per pixel.
-        power: the objective power at which the patches are extracted.
-        power_rtol: the acceptable relative tolerance for objective power.
-        power_atol: the acceptable absolute tolerance for objective power.
+        level: the whole slide image level at which the image is extracted. (default=0)
+            This is overridden if the level argument is provided in `get_data`.
         channel_dim: the desired dimension for color channel. Default to 0 (channel first).
-        dtype: the data type of output image. Defaults to `np.uint8`.
-        device: target device to put the extracted patch. Note that if device is "cuda"",
-            the output will be converted to torch tenor and sent to the gpu even if the dtype is numpy.
-        mode: the output image color mode, "RGB" or "RGBA". Defaults to "RGB".
-        num_workers: number of workers for multi-thread image loading.
+        num_workers: number of workers for multi-thread image loading
         kwargs: additional args for `cucim.CuImage` module:
             https://github.com/rapidsai/cucim/blob/main/cpp/include/cucim/cuimage.h
-
-        Notes:
-            Only one of resolution parameters, `level`, `mpp`, or `power`, should be provided.
-            If such parameters are provided in `get_data` method, those will override the values provided here.
-            If none of them are provided here or in `get_data`, `level=0` will be used.
 
     """
 
     supported_suffixes = ["tif", "tiff", "svs"]
     backend = "cucim"
 
-    def __init__(self, num_workers: int = 0, **kwargs):
-        super().__init__(**kwargs)
+    def __init__(self, level: int = 0, channel_dim: int = 0, num_workers: int = 0, **kwargs):
+        super().__init__(level, channel_dim, **kwargs)
         self.num_workers = num_workers
 
     @staticmethod
@@ -689,82 +453,68 @@ class CuCIMWSIReader(BaseWSIReader):
         Returns the number of levels in the whole slide image.
 
         Args:
-            wsi: a whole slide image object loaded from a file.
+            wsi: a whole slide image object loaded from a file
 
         """
         return wsi.resolutions["level_count"]  # type: ignore
 
-    def get_size(self, wsi, level: int) -> tuple[int, int]:
+
+    def get_size(self, wsi, level: Optional[int] = None) -> Tuple[int, int]:
         """
         Returns the size (height, width) of the whole slide image at a given level.
 
         Args:
-            wsi: a whole slide image object loaded from a file.
-            level: the level number where the size is calculated.
+            wsi: a whole slide image object loaded from a file
+            level: the level number where the size is calculated. If not provided the default level (from `self.level`)
+                will be used.
 
         """
+        if level is None:
+            level = self.level
+
         return (wsi.resolutions["level_dimensions"][level][1], wsi.resolutions["level_dimensions"][level][0])
 
-    def get_downsample_ratio(self, wsi, level: int) -> float:
+
+    def get_downsample_ratio(self, wsi, level: Optional[int] = None) -> float:
         """
         Returns the down-sampling ratio of the whole slide image at a given level.
 
         Args:
-            wsi: a whole slide image object loaded from a file.
-            level: the level number where the downsample ratio is calculated.
+            wsi: a whole slide image object loaded from a file
+            level: the level number where the size is calculated. If not provided the default level (from `self.level`)
+                will be used.
 
         """
-        return float(wsi.resolutions["level_downsamples"][level])
+        if level is None:
+            level = self.level
+
+        return wsi.resolutions["level_downsamples"][level]  # type: ignore
+
 
     @staticmethod
     def get_file_path(wsi) -> str:
         """Return the file path for the WSI object"""
         return str(abspath(wsi.path))
 
-    def get_mpp(self, wsi, level: int) -> tuple[float, float]:
+
+    def get_mpp(self, wsi, level: Optional[int] = None) -> Tuple[float, float]:
         """
         Returns the micro-per-pixel resolution of the whole slide image at a given level.
 
         Args:
-            wsi: a whole slide image object loaded from a file.
-            level: the level number where the mpp is calculated.
+            wsi: a whole slide image object loaded from a file
+            level: the level number where the size is calculated. If not provided the default level (from `self.level`)
+                will be used.
 
         """
-        downsample_ratio = self.get_downsample_ratio(wsi, level)
+        if level is None:
+            level = self.level
 
-        if "aperio" in wsi.metadata:
-            mpp_ = wsi.metadata["aperio"].get("MPP")
-            if mpp_:
-                return (downsample_ratio * float(mpp_),) * 2
-        if "cucim" in wsi.metadata:
-            mpp_ = wsi.metadata["cucim"].get("spacing")
-            if mpp_ and isinstance(mpp_, Sequence) and len(mpp_) >= 2:
-                if mpp_[0] and mpp_[1]:
-                    return (downsample_ratio * mpp_[1], downsample_ratio * mpp_[0])
+        factor = float(wsi.resolutions["level_downsamples"][level])
+        return (wsi.metadata["cucim"]["spacing"][1] * factor, wsi.metadata["cucim"]["spacing"][0] * factor)
 
-        raise ValueError("`mpp` cannot be obtained for this file. Please use `level` instead.")
 
-    def get_power(self, wsi, level: int) -> float:
-        """
-        Returns the objective power of the whole slide image at a given level.
-
-        Args:
-            wsi: a whole slide image object loaded from a file.
-            level: the level number where the objective power is calculated.
-
-        """
-        if "aperio" in wsi.metadata:
-            objective_power = wsi.metadata["aperio"].get("AppMag")
-            if objective_power:
-                downsample_ratio = self.get_downsample_ratio(wsi, level)
-                return float(objective_power) / downsample_ratio
-
-        raise ValueError(
-            "Currently, cuCIM backend can obtain the objective power only for Aperio images. "
-            "Please use `level` (or `mpp`) instead, or try OpenSlide backend."
-        )
-
-    def read(self, data: Sequence[PathLike] | PathLike | np.ndarray, **kwargs):
+    def read(self, data: Union[Sequence[PathLike], PathLike, np.ndarray], **kwargs):
         """
         Read whole slide image objects from given file or list of files.
 
@@ -774,35 +524,35 @@ class CuCIMWSIReader(BaseWSIReader):
                 For more details look at https://github.com/rapidsai/cucim/blob/main/cpp/include/cucim/cuimage.h
 
         Returns:
-            whole slide image object or list of such objects.
+            whole slide image object or list of such objects
 
         """
-        cuimage_cls, _ = optional_import("cucim", name="CuImage")
-        wsi_list: list = []
+        wsi_list: List = []
 
         filenames: Sequence[PathLike] = ensure_tuple(data)
         kwargs_ = self.kwargs.copy()
         kwargs_.update(kwargs)
         for filename in filenames:
-            wsi = cuimage_cls(filename, **kwargs_)
+            wsi = CuImage(filename, **kwargs_)
             wsi_list.append(wsi)
 
         return wsi_list if len(filenames) > 1 else wsi_list[0]
 
+
     def _get_patch(
-        self, wsi, location: tuple[int, int], size: tuple[int, int], level: int, dtype: DtypeLike, mode: str
+        self, wsi, location: Tuple[int, int], size: Tuple[int, int], level: int, dtype: DtypeLike, mode: str
     ) -> np.ndarray:
         """
         Extracts and returns a patch image form the whole slide image.
 
         Args:
-            wsi: a whole slide image object loaded from a file or a lis of such objects.
+            wsi: a whole slide image object loaded from a file or a lis of such objects
             location: (top, left) tuple giving the top left pixel in the level 0 reference frame. Defaults to (0, 0).
             size: (height, width) tuple giving the patch size at the given level (`level`).
                 If None, it is set to the full image size at the given level.
-            level: the level number.
-            dtype: the data type of output image.
-            mode: the output image mode, 'RGB' or 'RGBA'.
+            level: the level number. Defaults to 0
+            dtype: the data type of output image
+            mode: the output image mode, 'RGB' or 'RGBA'
 
         """
         # Extract a patch or the entire image
@@ -824,9 +574,10 @@ class CuCIMWSIReader(BaseWSIReader):
                     f"The image is expected to have three or four color channels in '{mode}' mode but has "
                     f"{patch.shape[self.channel_dim]}. "
                 )
-            patch = np.take(patch, [0, 1, 2], self.channel_dim)
+            patch = patch[:3]
 
         return patch
+
 
 
 @require_pkg(pkg_name="openslide")
@@ -835,32 +586,15 @@ class OpenSlideWSIReader(BaseWSIReader):
     Read whole slide images and extract patches using OpenSlide library.
 
     Args:
-        level: the whole slide image level at which the patches are extracted.
-        mpp: the resolution in micron per pixel at which the patches are extracted.
-        mpp_rtol: the acceptable relative tolerance for resolution in micro per pixel.
-        mpp_atol: the acceptable absolute tolerance for resolution in micro per pixel.
-        power: the objective power at which the patches are extracted.
-        power_rtol: the acceptable relative tolerance for objective power.
-        power_atol: the acceptable absolute tolerance for objective power.
+        level: the whole slide image level at which the image is extracted. (default=0)
+            This is overridden if the level argument is provided in `get_data`.
         channel_dim: the desired dimension for color channel. Default to 0 (channel first).
-        dtype: the data type of output image. Defaults to `np.uint8`.
-        device: target device to put the extracted patch. Note that if device is "cuda"",
-            the output will be converted to torch tenor and sent to the gpu even if the dtype is numpy.
-        mode: the output image color mode, "RGB" or "RGBA". Defaults to "RGB".
         kwargs: additional args for `openslide.OpenSlide` module.
-
-        Notes:
-            Only one of resolution parameters, `level`, `mpp`, or `power`, should be provided.
-            If such parameters are provided in `get_data` method, those will override the values provided here.
-            If none of them are provided here or in `get_data`, `level=0` will be used.
 
     """
 
     supported_suffixes = ["tif", "tiff", "svs"]
     backend = "openslide"
-
-    def __init__(self, **kwargs):
-        super().__init__(**kwargs)
 
     @staticmethod
     def get_level_count(wsi) -> int:
@@ -868,95 +602,79 @@ class OpenSlideWSIReader(BaseWSIReader):
         Returns the number of levels in the whole slide image.
 
         Args:
-            wsi: a whole slide image object loaded from a file.
+            wsi: a whole slide image object loaded from a file
 
         """
         return wsi.level_count  # type: ignore
 
-    def get_size(self, wsi, level: int) -> tuple[int, int]:
+
+    def get_size(self, wsi, level: Optional[int] = None) -> Tuple[int, int]:
         """
         Returns the size (height, width) of the whole slide image at a given level.
 
         Args:
-            wsi: a whole slide image object loaded from a file.
-            level: the level number where the size is calculated.
+            wsi: a whole slide image object loaded from a file
+            level: the level number where the size is calculated. If not provided the default level (from `self.level`)
+                will be used.
 
         """
+        if level is None:
+            level = self.level
+
         return (wsi.level_dimensions[level][1], wsi.level_dimensions[level][0])
 
-    def get_downsample_ratio(self, wsi, level: int) -> float:
+
+    def get_downsample_ratio(self, wsi, level: Optional[int] = None) -> float:
         """
         Returns the down-sampling ratio of the whole slide image at a given level.
 
         Args:
-            wsi: a whole slide image object loaded from a file.
-            level: the level number where the downsample ratio is calculated.
+            wsi: a whole slide image object loaded from a file
+            level: the level number where the size is calculated. If not provided the default level (from `self.level`)
+                will be used.
 
         """
+        if level is None:
+            level = self.level
+
         return wsi.level_downsamples[level]  # type: ignore
+
 
     @staticmethod
     def get_file_path(wsi) -> str:
         """Return the file path for the WSI object"""
         return str(abspath(wsi._filename))
 
-    def get_mpp(self, wsi, level: int) -> tuple[float, float]:
+
+    def get_mpp(self, wsi, level: Optional[int] = None) -> Tuple[float, float]:
         """
         Returns the micro-per-pixel resolution of the whole slide image at a given level.
 
         Args:
-            wsi: a whole slide image object loaded from a file.
-            level: the level number where the mpp is calculated.
+            wsi: a whole slide image object loaded from a file
+            level: the level number where the size is calculated. If not provided the default level (from `self.level`)
+                will be used.
 
         """
-        downsample_ratio = self.get_downsample_ratio(wsi, level)
-        if (
-            "openslide.mpp-x" in wsi.properties
-            and "openslide.mpp-y" in wsi.properties
-            and wsi.properties["openslide.mpp-y"]
-            and wsi.properties["openslide.mpp-x"]
-        ):
-            return (
-                downsample_ratio * float(wsi.properties["openslide.mpp-y"]),
-                downsample_ratio * float(wsi.properties["openslide.mpp-x"]),
-            )
+        if level is None:
+            level = self.level
+        unit = wsi.properties["tiff.ResolutionUnit"]
+        if unit == "centimeter":
+            factor = 10000.0
+        elif unit == "millimeter":
+            factor = 1000.0
+        elif unit == "micrometer":
+            factor = 1.0
+        elif unit == "inch":
+            factor = 25400.0
+        else:
+            raise ValueError(f"The resolution unit is not a valid tiff resolution: {unit}")
 
-        if (
-            "tiff.XResolution" in wsi.properties
-            and "tiff.YResolution" in wsi.properties
-            and wsi.properties["tiff.YResolution"]
-            and wsi.properties["tiff.XResolution"]
-        ):
-            unit = wsi.properties.get("tiff.ResolutionUnit")
-            if unit is None:
-                warnings.warn("The resolution unit is missing, `micrometer` will be used as default.")
-                unit = "micrometer"
+        factor *= wsi.level_downsamples[level]
+        return (factor / float(wsi.properties["tiff.YResolution"]), factor / float(wsi.properties["tiff.XResolution"]))
 
-            convert_to_micron = ConvertUnits(unit, "micrometer")
-            return (
-                convert_to_micron(downsample_ratio / float(wsi.properties["tiff.YResolution"])),
-                convert_to_micron(downsample_ratio / float(wsi.properties["tiff.XResolution"])),
-            )
 
-        raise ValueError("`mpp` cannot be obtained for this file. Please use `level` instead.")
-
-    def get_power(self, wsi, level: int) -> float:
-        """
-        Returns the objective power of the whole slide image at a given level.
-
-        Args:
-            wsi: a whole slide image object loaded from a file.
-            level: the level number where the objective power is calculated.
-
-        """
-        objective_power = wsi.properties.get("openslide.objective-power")
-        if objective_power:
-            downsample_ratio = self.get_downsample_ratio(wsi, level)
-            return float(objective_power) / downsample_ratio
-
-        raise ValueError("Objective `power` cannot be obtained for this file. Please use `level` (or `mpp`) instead.")
-
-    def read(self, data: Sequence[PathLike] | PathLike | np.ndarray, **kwargs):
+    def read(self, data: Union[Sequence[PathLike], PathLike, np.ndarray], **kwargs):
         """
         Read whole slide image objects from given file or list of files.
 
@@ -965,10 +683,10 @@ class OpenSlideWSIReader(BaseWSIReader):
             kwargs: additional args that overrides `self.kwargs` for existing keys.
 
         Returns:
-            whole slide image object or list of such objects.
+            whole slide image object or list of such objects
 
         """
-        wsi_list: list = []
+        wsi_list: List = []
 
         filenames: Sequence[PathLike] = ensure_tuple(data)
         kwargs_ = self.kwargs.copy()
@@ -979,8 +697,9 @@ class OpenSlideWSIReader(BaseWSIReader):
 
         return wsi_list if len(filenames) > 1 else wsi_list[0]
 
+
     def _get_patch(
-        self, wsi, location: tuple[int, int], size: tuple[int, int], level: int, dtype: DtypeLike, mode: str
+        self, wsi, location: Tuple[int, int], size: Tuple[int, int], level: int, dtype: DtypeLike, mode: str
     ) -> np.ndarray:
         """
         Extracts and returns a patch image form the whole slide image.
@@ -990,9 +709,9 @@ class OpenSlideWSIReader(BaseWSIReader):
             location: (top, left) tuple giving the top left pixel in the level 0 reference frame. Defaults to (0, 0).
             size: (height, width) tuple giving the patch size at the given level (`level`).
                 If None, it is set to the full image size at the given level.
-            level: the level number.
-            dtype: the data type of output image.
-            mode: the output image mode, 'RGB' or 'RGBA'.
+            level: the level number. Defaults to 0
+            dtype: the data type of output image
+            mode: the output image mode, 'RGB' or 'RGBA'
 
         """
         # Extract a patch or the entire image
@@ -1011,36 +730,22 @@ class OpenSlideWSIReader(BaseWSIReader):
         return patch
 
 
+
 @require_pkg(pkg_name="tifffile")
 class TiffFileWSIReader(BaseWSIReader):
     """
     Read whole slide images and extract patches using TiffFile library.
 
     Args:
-        level: the whole slide image level at which the patches are extracted.
-        mpp: the resolution in micron per pixel at which the patches are extracted.
-        mpp_rtol: the acceptable relative tolerance for resolution in micro per pixel.
-        mpp_atol: the acceptable absolute tolerance for resolution in micro per pixel.
+        level: the whole slide image level at which the image is extracted. (default=0)
+            This is overridden if the level argument is provided in `get_data`.
         channel_dim: the desired dimension for color channel. Default to 0 (channel first).
-        dtype: the data type of output image. Defaults to `np.uint8`.
-        device: target device to put the extracted patch. Note that if device is "cuda"",
-            the output will be converted to torch tenor and sent to the gpu even if the dtype is numpy.
-        mode: the output image color mode, "RGB" or "RGBA". Defaults to "RGB".
         kwargs: additional args for `tifffile.TiffFile` module.
-
-        Notes:
-            - Objective power cannot be obtained via TiffFile backend.
-            - Only one of resolution parameters, `level` or `mpp`, should be provided.
-                If such parameters are provided in `get_data` method, those will override the values provided here.
-                If none of them are provided here or in `get_data`, `level=0` will be used.
 
     """
 
     supported_suffixes = ["tif", "tiff", "svs"]
     backend = "tifffile"
-
-    def __init__(self, **kwargs):
-        super().__init__(**kwargs)
 
     @staticmethod
     def get_level_count(wsi) -> int:
@@ -1048,83 +753,82 @@ class TiffFileWSIReader(BaseWSIReader):
         Returns the number of levels in the whole slide image.
 
         Args:
-            wsi: a whole slide image object loaded from a file.
+            wsi: a whole slide image object loaded from a file
 
         """
         return len(wsi.pages)
 
-    def get_size(self, wsi, level: int) -> tuple[int, int]:
+
+    def get_size(self, wsi, level: Optional[int] = None) -> Tuple[int, int]:
         """
         Returns the size (height, width) of the whole slide image at a given level.
 
         Args:
-            wsi: a whole slide image object loaded from a file.
-            level: the level number where the size is calculated.
+            wsi: a whole slide image object loaded from a file
+            level: the level number where the size is calculated. If not provided the default level (from `self.level`)
+                will be used.
 
         """
+        if level is None:
+            level = self.level
+
         return (wsi.pages[level].imagelength, wsi.pages[level].imagewidth)
 
-    def get_downsample_ratio(self, wsi, level: int) -> float:
+
+    def get_downsample_ratio(self, wsi, level: Optional[int] = None) -> float:
         """
         Returns the down-sampling ratio of the whole slide image at a given level.
 
         Args:
-            wsi: a whole slide image object loaded from a file.
-            level: the level number where the downsample ratio is calculated.
+            wsi: a whole slide image object loaded from a file
+            level: the level number where the size is calculated. If not provided the default level (from `self.level`)
+                will be used.
 
         """
+        if level is None:
+            level = self.level
+
         return float(wsi.pages[0].imagelength) / float(wsi.pages[level].imagelength)
+
 
     @staticmethod
     def get_file_path(wsi) -> str:
         """Return the file path for the WSI object"""
         return str(abspath(wsi.filehandle.path))
 
-    def get_mpp(self, wsi, level: int) -> tuple[float, float]:
+
+    def get_mpp(self, wsi, level: Optional[int] = None) -> Tuple[float, float]:
         """
         Returns the micro-per-pixel resolution of the whole slide image at a given level.
 
         Args:
-            wsi: a whole slide image object loaded from a file.
-            level: the level number where the mpp is calculated.
+            wsi: a whole slide image object loaded from a file
+            level: the level number where the size is calculated. If not provided the default level (from `self.level`)
+                will be used.
 
         """
-        if (
-            "XResolution" in wsi.pages[level].tags
-            and "YResolution" in wsi.pages[level].tags
-            and wsi.pages[level].tags["XResolution"].value
-            and wsi.pages[level].tags["YResolution"].value
-        ):
-            unit = wsi.pages[level].tags.get("ResolutionUnit")
-            if unit is not None:
-                unit = str(unit.value)[8:]
-            else:
-                warnings.warn("The resolution unit is missing. `micrometer` will be used as default.")
-                unit = "micrometer"
+        if level is None:
+            level = self.level
 
-            convert_to_micron = ConvertUnits(unit, "micrometer")
-            # Here x and y resolutions are rational numbers so each of them is represented by a tuple.
-            yres = wsi.pages[level].tags["YResolution"].value
-            xres = wsi.pages[level].tags["XResolution"].value
-            return convert_to_micron(yres[1] / yres[0]), convert_to_micron(xres[1] / xres[0])
+        unit = wsi.pages[level].tags["ResolutionUnit"].value
+        if unit == unit.CENTIMETER:
+            factor = 10000.0
+        elif unit == unit.MILLIMETER:
+            factor = 1000.0
+        elif unit == unit.MICROMETER:
+            factor = 1.0
+        elif unit == unit.INCH:
+            factor = 25400.0
+        else:
+            raise ValueError(f"The resolution unit is not a valid tiff resolution or missing: {unit.name}")
 
-        raise ValueError("`mpp`  cannot be obtained for this file. Please use `level` instead.")
+        # Here x and y resolutions are rational numbers so each of them is represented by a tuple.
+        yres = wsi.pages[level].tags["YResolution"].value
+        xres = wsi.pages[level].tags["XResolution"].value
+        return (factor * yres[1] / yres[0], factor * xres[1] / xres[0])
 
-    def get_power(self, wsi, level: int) -> float:
-        """
-        Returns the objective power of the whole slide image at a given level.
 
-        Args:
-            wsi: a whole slide image object loaded from a file.
-            level: the level number where the objective power is calculated.
-
-        """
-        raise ValueError(
-            "Currently, TiffFile does not provide a general API to obtain objective power."
-            "Please use `level` (or `mpp`) instead, or try other backends."
-        )
-
-    def read(self, data: Sequence[PathLike] | PathLike | np.ndarray, **kwargs):
+    def read(self, data: Union[Sequence[PathLike], PathLike, np.ndarray], **kwargs):
         """
         Read whole slide image objects from given file or list of files.
 
@@ -1133,10 +837,10 @@ class TiffFileWSIReader(BaseWSIReader):
             kwargs: additional args that overrides `self.kwargs` for existing keys.
 
         Returns:
-            whole slide image object or list of such objects.
+            whole slide image object or list of such objects
 
         """
-        wsi_list: list = []
+        wsi_list: List = []
 
         filenames: Sequence[PathLike] = ensure_tuple(data)
         kwargs_ = self.kwargs.copy()
@@ -1147,8 +851,9 @@ class TiffFileWSIReader(BaseWSIReader):
 
         return wsi_list if len(filenames) > 1 else wsi_list[0]
 
+
     def _get_patch(
-        self, wsi, location: tuple[int, int], size: tuple[int, int], level: int, dtype: DtypeLike, mode: str
+        self, wsi, location: Tuple[int, int], size: Tuple[int, int], level: int, dtype: DtypeLike, mode: str
     ) -> np.ndarray:
         """
         Extracts and returns a patch image form the whole slide image.
@@ -1158,9 +863,9 @@ class TiffFileWSIReader(BaseWSIReader):
             location: (top, left) tuple giving the top left pixel in the level 0 reference frame. Defaults to (0, 0).
             size: (height, width) tuple giving the patch size at the given level (`level`).
                 If None, it is set to the full image size at the given level.
-            level: the level number.
-            dtype: the data type of output image.
-            mode: the output image mode, 'RGB' or 'RGBA'.
+            level: the level number. Defaults to 0
+            dtype: the data type of output image
+            mode: the output image mode, 'RGB' or 'RGBA'
 
         """
         # Load the entire image
@@ -1171,7 +876,7 @@ class TiffFileWSIReader(BaseWSIReader):
         # Extract patch
         downsampling_ratio = self.get_downsample_ratio(wsi=wsi, level=level)
         location_ = [round(location[i] / downsampling_ratio) for i in range(len(location))]
-        patch = wsi_image[location_[0] : location_[0] + size[0], location_[1] : location_[1] + size[1], :]
+        patch = wsi_image[location_[0] : location_[0] + size[0], location_[1] : location_[1] + size[1], :].copy()
 
         # Make the channel to desired dimensions
         patch = np.moveaxis(patch, -1, self.channel_dim)
@@ -1183,6 +888,347 @@ class TiffFileWSIReader(BaseWSIReader):
                     f"The image is expected to have three or four color channels in '{mode}' mode but has "
                     f"{patch.shape[self.channel_dim]}. "
                 )
-            patch = np.take(patch, [0, 1, 2], self.channel_dim)
+            patch = patch[:3]
 
         return patch
+
+#     ############################################################################################################################
+#     # implemented by FLS 2023-04-19
+    
+    
+    
+    
+# @require_pkg(pkg_name="czifile")
+# class CziFileWSIReader(BaseWSIReader):
+#     """
+#     Read whole slide images and extract patches using czifile library.
+
+#     Args:
+#         level: the whole slide image level at which the image is extracted. (default=0)
+#             This is overridden if the level argument is provided in `get_data`.
+#         channel_dim: the desired dimension for color channel. Default to 0 (channel first).
+#         kwargs: additional args for `tifffile.TiffFile` module.
+
+#     """
+
+#     supported_suffixes = ["czi"]
+#     backend = "czifile"
+
+#     @staticmethod
+#     def get_level_count(wsi) -> int:
+#         """
+#         Returns the number of levels in the whole slide image.
+
+#         Args:
+#             wsi: a whole slide image object loaded from a file
+
+#         """
+#         return len(wsi.pages)
+
+
+#     def get_size(self, wsi, level: Optional[int] = None) -> Tuple[int, int]:
+#         """
+#         Returns the size (height, width) of the whole slide image at a given level.
+
+#         Args:
+#             wsi: a whole slide image object loaded from a file
+#             level: the level number where the size is calculated. If not provided the default level (from `self.level`)
+#                 will be used.
+
+#         """
+#         if level is None:
+#             level = self.level
+
+#         return (wsi.pages[level].imagelength, wsi.pages[level].imagewidth)
+
+
+#     def get_downsample_ratio(self, wsi, level: Optional[int] = None) -> float:
+#         """
+#         Returns the down-sampling ratio of the whole slide image at a given level.
+
+#         Args:
+#             wsi: a whole slide image object loaded from a file
+#             level: the level number where the size is calculated. If not provided the default level (from `self.level`)
+#                 will be used.
+
+#         """
+#         if level is None:
+#             level = self.level
+
+#         return float(wsi.pages[0].imagelength) / float(wsi.pages[level].imagelength)
+
+
+#     @staticmethod
+#     def get_file_path(wsi) -> str:
+#         """Return the file path for the WSI object"""
+#         return str(abspath(wsi.filehandle.path))
+
+
+#     def get_mpp(self, wsi, level: Optional[int] = None) -> Tuple[float, float]:
+#         """
+#         Returns the micro-per-pixel resolution of the whole slide image at a given level.
+
+#         Args:
+#             wsi: a whole slide image object loaded from a file
+#             level: the level number where the size is calculated. If not provided the default level (from `self.level`)
+#                 will be used.
+
+#         """
+#         if level is None:
+#             level = self.level
+
+#         unit = wsi.pages[level].tags["ResolutionUnit"].value
+#         if unit == unit.CENTIMETER:
+#             factor = 10000.0
+#         elif unit == unit.MILLIMETER:
+#             factor = 1000.0
+#         elif unit == unit.MICROMETER:
+#             factor = 1.0
+#         elif unit == unit.INCH:
+#             factor = 25400.0
+#         else:
+#             raise ValueError(f"The resolution unit is not a valid tiff resolution or missing: {unit.name}")
+
+#         # Here x and y resolutions are rational numbers so each of them is represented by a tuple.
+#         yres = wsi.pages[level].tags["YResolution"].value
+#         xres = wsi.pages[level].tags["XResolution"].value
+#         return (factor * yres[1] / yres[0], factor * xres[1] / xres[0])
+
+
+#     def read(self, data: Union[Sequence[PathLike], PathLike, np.ndarray], **kwargs):
+#         """
+#         Read whole slide image objects from given file or list of files.
+
+#         Args:
+#             data: file name or a list of file names to read.
+#             kwargs: additional args that overrides `self.kwargs` for existing keys.
+
+#         Returns:
+#             whole slide image object or list of such objects
+
+#         """
+#         wsi_list: List = []
+
+#         filenames: Sequence[PathLike] = ensure_tuple(data)
+#         kwargs_ = self.kwargs.copy()
+#         kwargs_.update(kwargs)
+#         for filename in filenames:
+#             wsi = TiffFile(filename, **kwargs_)
+#             wsi_list.append(wsi)
+
+#         return wsi_list if len(filenames) > 1 else wsi_list[0]
+
+
+#     def _get_patch(
+#         self, wsi, location: Tuple[int, int], size: Tuple[int, int], level: int, dtype: DtypeLike, mode: str
+#     ) -> np.ndarray:
+#         """
+#         Extracts and returns a patch image form the whole slide image.
+
+#         Args:
+#             wsi: a whole slide image object loaded from a file or a lis of such objects
+#             location: (top, left) tuple giving the top left pixel in the level 0 reference frame. Defaults to (0, 0).
+#             size: (height, width) tuple giving the patch size at the given level (`level`).
+#                 If None, it is set to the full image size at the given level.
+#             level: the level number. Defaults to 0
+#             dtype: the data type of output image
+#             mode: the output image mode, 'RGB' or 'RGBA'
+
+#         """
+#         # Load the entire image
+#         wsi_image: np.ndarray = wsi.asarray(level=level).astype(dtype)
+#         if len(wsi_image.shape) < 3:
+#             wsi_image = wsi_image[..., None]
+
+#         # Extract patch
+#         downsampling_ratio = self.get_downsample_ratio(wsi=wsi, level=level)
+#         location_ = [round(location[i] / downsampling_ratio) for i in range(len(location))]
+#         patch = wsi_image[location_[0] : location_[0] + size[0], location_[1] : location_[1] + size[1], :].copy()
+
+#         # Make the channel to desired dimensions
+#         patch = np.moveaxis(patch, -1, self.channel_dim)
+
+#         # Check if the color channel is 3 (RGB) or 4 (RGBA)
+#         if mode in "RGB":
+#             if patch.shape[self.channel_dim] not in [3, 4]:
+#                 raise ValueError(
+#                     f"The image is expected to have three or four color channels in '{mode}' mode but has "
+#                     f"{patch.shape[self.channel_dim]}. "
+#                 )
+#             patch = patch[:3]
+
+#         return patch
+
+#########################################################################################################################
+#JS 2023.04.21
+
+@require_pkg(pkg_name="pylibCZIrw")
+class ZeissCZIWSIReader(BaseWSIReader):
+    """
+    Read whole slide images and extract patches using pylibCZIrw library for .czi (Carl Zeiss Image format).
+
+    Args:
+        level: the whole slide image level at which the image is extracted. (default=0)
+            This is overridden if the level argument is provided in `get_data`.
+        channel_dim: the desired dimension for color channel. Default to 0 (channel first).
+        kwargs: additional args for `tifffile.TiffFile` module.  #change?
+
+    """
+
+    supported_suffixes = ["czi"]
+    backend = "pylibCZIrw"
+
+    @staticmethod
+    def get_level_count(wsi) -> int:
+        """
+        Returns the number of levels in the whole slide image.
+
+        Args:
+            wsi: a whole slide image object loaded from a file
+
+        """
+        return len(wsi.pages)
+
+
+    def get_size(self, wsi, level: Optional[int] = None) -> Tuple[int, int]:
+        """
+        Returns the size (height, width) of the whole slide image at a given level.
+
+        Args:
+            wsi: a whole slide image object loaded from a file
+            level: the level number where the size is calculated. If not provided the default level (from `self.level`)
+                will be used.
+
+        """
+        if level is None:
+            level = self.level
+
+        return (wsi.pages[level].imagelength, wsi.pages[level].imagewidth)
+
+
+    def get_downsample_ratio(self, wsi, level: Optional[int] = None) -> float:
+        """
+        Returns the down-sampling ratio of the whole slide image at a given level.
+
+        Args:
+            wsi: a whole slide image object loaded from a file
+            level: the level number where the size is calculated. If not provided the default level (from `self.level`)
+                will be used.
+
+        """
+        if level is None:
+            level = self.level
+
+        return float(wsi.pages[0].imagelength) / float(wsi.pages[level].imagelength)
+
+
+    @staticmethod
+    def get_file_path(wsi) -> str:
+        """Return the file path for the WSI object"""
+        return str(abspath(wsi.filehandle.path))
+
+
+    def get_mpp(self, wsi, level: Optional[int] = None) -> Tuple[float, float]:
+        """
+        Returns the micro-per-pixel resolution of the whole slide image at a given level.
+
+        Args:
+            wsi: a whole slide image object loaded from a file
+            level: the level number where the size is calculated. If not provided the default level (from `self.level`)
+                will be used.
+
+        """
+        if level is None:
+            level = self.level
+
+        unit = wsi.pages[level].tags["ResolutionUnit"].value
+        if unit == unit.CENTIMETER:
+            factor = 10000.0
+        elif unit == unit.MILLIMETER:
+            factor = 1000.0
+        elif unit == unit.MICROMETER:
+            factor = 1.0
+        elif unit == unit.INCH:
+            factor = 25400.0
+        else:
+            raise ValueError(f"The resolution unit is not a valid tiff resolution or missing: {unit.name}")
+
+        # Here x and y resolutions are rational numbers so each of them is represented by a tuple.
+        yres = wsi.pages[level].tags["YResolution"].value
+        xres = wsi.pages[level].tags["XResolution"].value
+        return (factor * yres[1] / yres[0], factor * xres[1] / xres[0])
+
+
+    def read(self, data: Union[Sequence[PathLike], PathLike, np.ndarray], **kwargs):
+        """
+        Read whole slide image objects from given file or list of files.
+
+        Args:
+            data: file name or a list of file names to read.
+            kwargs: additional args that overrides `self.kwargs` for existing keys.
+
+        Returns:
+            whole slide image object or list of such objects
+
+        """
+        wsi_list: List = []
+
+        filenames: Sequence[PathLike] = ensure_tuple(data)
+        kwargs_ = self.kwargs.copy()
+        kwargs_.update(kwargs)
+        for filename in filenames:
+            wsi = TiffFile(filename, **kwargs_)
+            wsi_list.append(wsi)
+
+        return wsi_list if len(filenames) > 1 else wsi_list[0]
+
+
+    def _get_patch(
+        self, wsi, location: Tuple[int, int], size: Tuple[int, int], level: int, dtype: DtypeLike, mode: str
+    ) -> np.ndarray:
+        """
+        Extracts and returns a patch image form the whole slide image.
+
+        Args:
+            wsi: a whole slide image object loaded from a file or a list of such objects
+            location: (top, left) tuple giving the top left pixel in the level 0 reference frame. Defaults to (0, 0).
+            size: (height, width) tuple giving the patch size at the given level (`level`).
+                If None, it is set to the full image size at the given level.
+            level: the level number. Defaults to 0
+            dtype: the data type of output image
+            mode: the output image mode, 'RGB' or 'RGBA'
+
+        """
+        # Load the entire image
+        wsi_image: np.ndarray = wsi.asarray(level=level).astype(dtype)
+        if len(wsi_image.shape) < 3:
+            wsi_image = wsi_image[..., None]
+            
+        if mode in "BGR": #import openCV?
+            wsi_image = wsi_image[...,::-1].copy()
+            mode = "RGB"
+            return wsi_image
+            
+
+        # Extract patch
+        downsampling_ratio = self.get_downsample_ratio(wsi=wsi, level=level)
+        location_ = [round(location[i] / downsampling_ratio) for i in range(len(location))]
+        patch = wsi_image[location_[0] : location_[0] + size[0], location_[1] : location_[1] + size[1], :].copy()
+
+        # Make the channel to desired dimensions
+        patch = np.moveaxis(patch, -1, self.channel_dim)
+
+        # Check if the color channel is 3 (RGB) or 4 (RGBA)
+        if mode in "RGB":
+            if patch.shape[self.channel_dim] not in [3, 4]:
+                raise ValueError(
+                    f"The image is expected to have three or four color channels in '{mode}' mode but has "
+                    f"{patch.shape[self.channel_dim]}. "
+                )
+            patch = patch[:3]
+            
+       
+
+        return patch
+
+
