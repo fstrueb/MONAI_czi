@@ -12,11 +12,11 @@
 # To build with a different base image
 # please run `docker build` using the `--build-arg PYTORCH_IMAGE=...` flag.
 ARG PYTORCH_IMAGE=nvcr.io/nvidia/pytorch:23.03-py3
-ARG JUPYTERHUB_VERSION=2.3.1
+# ARG JUPYTERHUB_VERSION=2.3.1
 FROM ${PYTORCH_IMAGE}
 
 RUN pip3 install --no-cache \
-    jupyterhub==$JUPYTERHUB_VERSION
+    jupyterhub==2.3.1
 
 LABEL maintainer="monai.contact@gmail.com"
 
