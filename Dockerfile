@@ -12,7 +12,11 @@
 # To build with a different base image
 # please run `docker build` using the `--build-arg PYTORCH_IMAGE=...` flag.
 ARG PYTORCH_IMAGE=nvcr.io/nvidia/pytorch:23.03-py3
+ARG JUPYTERHUB_VERSION=2.3.1
 FROM ${PYTORCH_IMAGE}
+
+RUN pip3 install --no-cache \
+    jupyterhub==$JUPYTERHUB_VERSION
 
 LABEL maintainer="monai.contact@gmail.com"
 
@@ -49,3 +53,10 @@ RUN apt-get update \
 # append /opt/tools to runtime path for NGC CLI to be accessible from all file system locations
 ENV PATH=${PATH}:/opt/tools
 WORKDIR /opt/monai
+
+RUN useradd -m jovyan
+ENV HOME=/home/jovyan
+WORKDIR $HOME
+USER jovyan
+
+CMD ["jupyterhub-singleuser"]
