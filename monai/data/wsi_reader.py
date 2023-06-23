@@ -892,175 +892,7 @@ class TiffFileWSIReader(BaseWSIReader):
 
         return patch
 
-#     ############################################################################################################################
-#     # implemented by FLS 2023-04-19
-    
-    
-    
-    
-# @require_pkg(pkg_name="czifile")
-# class CziFileWSIReader(BaseWSIReader):
-#     """
-#     Read whole slide images and extract patches using czifile library.
-
-#     Args:
-#         level: the whole slide image level at which the image is extracted. (default=0)
-#             This is overridden if the level argument is provided in `get_data`.
-#         channel_dim: the desired dimension for color channel. Default to 0 (channel first).
-#         kwargs: additional args for `tifffile.TiffFile` module.
-
-#     """
-
-#     supported_suffixes = ["czi"]
-#     backend = "czifile"
-
-#     @staticmethod
-#     def get_level_count(wsi) -> int:
-#         """
-#         Returns the number of levels in the whole slide image.
-
-#         Args:
-#             wsi: a whole slide image object loaded from a file
-
-#         """
-#         return len(wsi.pages)
-
-
-#     def get_size(self, wsi, level: Optional[int] = None) -> Tuple[int, int]:
-#         """
-#         Returns the size (height, width) of the whole slide image at a given level.
-
-#         Args:
-#             wsi: a whole slide image object loaded from a file
-#             level: the level number where the size is calculated. If not provided the default level (from `self.level`)
-#                 will be used.
-
-#         """
-#         if level is None:
-#             level = self.level
-
-#         return (wsi.pages[level].imagelength, wsi.pages[level].imagewidth)
-
-
-#     def get_downsample_ratio(self, wsi, level: Optional[int] = None) -> float:
-#         """
-#         Returns the down-sampling ratio of the whole slide image at a given level.
-
-#         Args:
-#             wsi: a whole slide image object loaded from a file
-#             level: the level number where the size is calculated. If not provided the default level (from `self.level`)
-#                 will be used.
-
-#         """
-#         if level is None:
-#             level = self.level
-
-#         return float(wsi.pages[0].imagelength) / float(wsi.pages[level].imagelength)
-
-
-#     @staticmethod
-#     def get_file_path(wsi) -> str:
-#         """Return the file path for the WSI object"""
-#         return str(abspath(wsi.filehandle.path))
-
-
-#     def get_mpp(self, wsi, level: Optional[int] = None) -> Tuple[float, float]:
-#         """
-#         Returns the micro-per-pixel resolution of the whole slide image at a given level.
-
-#         Args:
-#             wsi: a whole slide image object loaded from a file
-#             level: the level number where the size is calculated. If not provided the default level (from `self.level`)
-#                 will be used.
-
-#         """
-#         if level is None:
-#             level = self.level
-
-#         unit = wsi.pages[level].tags["ResolutionUnit"].value
-#         if unit == unit.CENTIMETER:
-#             factor = 10000.0
-#         elif unit == unit.MILLIMETER:
-#             factor = 1000.0
-#         elif unit == unit.MICROMETER:
-#             factor = 1.0
-#         elif unit == unit.INCH:
-#             factor = 25400.0
-#         else:
-#             raise ValueError(f"The resolution unit is not a valid tiff resolution or missing: {unit.name}")
-
-#         # Here x and y resolutions are rational numbers so each of them is represented by a tuple.
-#         yres = wsi.pages[level].tags["YResolution"].value
-#         xres = wsi.pages[level].tags["XResolution"].value
-#         return (factor * yres[1] / yres[0], factor * xres[1] / xres[0])
-
-
-#     def read(self, data: Union[Sequence[PathLike], PathLike, np.ndarray], **kwargs):
-#         """
-#         Read whole slide image objects from given file or list of files.
-
-#         Args:
-#             data: file name or a list of file names to read.
-#             kwargs: additional args that overrides `self.kwargs` for existing keys.
-
-#         Returns:
-#             whole slide image object or list of such objects
-
-#         """
-#         wsi_list: List = []
-
-#         filenames: Sequence[PathLike] = ensure_tuple(data)
-#         kwargs_ = self.kwargs.copy()
-#         kwargs_.update(kwargs)
-#         for filename in filenames:
-#             wsi = TiffFile(filename, **kwargs_)
-#             wsi_list.append(wsi)
-
-#         return wsi_list if len(filenames) > 1 else wsi_list[0]
-
-
-#     def _get_patch(
-#         self, wsi, location: Tuple[int, int], size: Tuple[int, int], level: int, dtype: DtypeLike, mode: str
-#     ) -> np.ndarray:
-#         """
-#         Extracts and returns a patch image form the whole slide image.
-
-#         Args:
-#             wsi: a whole slide image object loaded from a file or a lis of such objects
-#             location: (top, left) tuple giving the top left pixel in the level 0 reference frame. Defaults to (0, 0).
-#             size: (height, width) tuple giving the patch size at the given level (`level`).
-#                 If None, it is set to the full image size at the given level.
-#             level: the level number. Defaults to 0
-#             dtype: the data type of output image
-#             mode: the output image mode, 'RGB' or 'RGBA'
-
-#         """
-#         # Load the entire image
-#         wsi_image: np.ndarray = wsi.asarray(level=level).astype(dtype)
-#         if len(wsi_image.shape) < 3:
-#             wsi_image = wsi_image[..., None]
-
-#         # Extract patch
-#         downsampling_ratio = self.get_downsample_ratio(wsi=wsi, level=level)
-#         location_ = [round(location[i] / downsampling_ratio) for i in range(len(location))]
-#         patch = wsi_image[location_[0] : location_[0] + size[0], location_[1] : location_[1] + size[1], :].copy()
-
-#         # Make the channel to desired dimensions
-#         patch = np.moveaxis(patch, -1, self.channel_dim)
-
-#         # Check if the color channel is 3 (RGB) or 4 (RGBA)
-#         if mode in "RGB":
-#             if patch.shape[self.channel_dim] not in [3, 4]:
-#                 raise ValueError(
-#                     f"The image is expected to have three or four color channels in '{mode}' mode but has "
-#                     f"{patch.shape[self.channel_dim]}. "
-#                 )
-#             patch = patch[:3]
-
-#         return patch
-
-#########################################################################################################################
-#JS 2023.04.21
+# pylibCZI implementation
 
 @require_pkg(pkg_name="pylibCZIrw")
 class ZeissCZIWSIReader(BaseWSIReader):
@@ -1087,7 +919,11 @@ class ZeissCZIWSIReader(BaseWSIReader):
             wsi: a whole slide image object loaded from a file
 
         """
-        return len(wsi.pages)
+        with pyczi.open_czi(wsi) as wsi_obj:
+            mylen = len(wsi_obj.total_bounding_box['C'])
+            # print("level_count is", mylen)
+            return mylen
+#        return len(wsi.pages)
 
 
     def get_size(self, wsi, level: Optional[int] = None) -> Tuple[int, int]:
@@ -1103,7 +939,11 @@ class ZeissCZIWSIReader(BaseWSIReader):
         if level is None:
             level = self.level
 
-        return (wsi.pages[level].imagelength, wsi.pages[level].imagewidth)
+#        etu return (wsi.pages[level].imagelength, wsi.pages[level].imagewidth)
+        with pyczi.open_czi(wsi) as wsi_obj:
+            mysize = (wsi_obj.total_bounding_rectangle[2], wsi_obj.total_bounding_rectangle[3]) 
+            # print("size is", mysize)
+            return mysize
 
 
     def get_downsample_ratio(self, wsi, level: Optional[int] = None) -> float:
@@ -1125,7 +965,7 @@ class ZeissCZIWSIReader(BaseWSIReader):
     @staticmethod
     def get_file_path(wsi) -> str:
         """Return the file path for the WSI object"""
-        return str(abspath(wsi.filehandle.path))
+        return str(wsi)
 
 
     def get_mpp(self, wsi, level: Optional[int] = None) -> Tuple[float, float]:
@@ -1177,7 +1017,10 @@ class ZeissCZIWSIReader(BaseWSIReader):
         kwargs_ = self.kwargs.copy()
         kwargs_.update(kwargs)
         for filename in filenames:
-            wsi = TiffFile(filename, **kwargs_)
+#             with pyczi.open_czi(filename, **kwargs_) as wsi:
+#             wsi = pyczi.open_czi(filename, **kwargs_)
+            wsi = filename
+            # print('success opening pyczi connection')
             wsi_list.append(wsi)
 
         return wsi_list if len(filenames) > 1 else wsi_list[0]
@@ -1199,36 +1042,42 @@ class ZeissCZIWSIReader(BaseWSIReader):
             mode: the output image mode, 'RGB' or 'RGBA'
 
         """
-        # Load the entire image
-        wsi_image: np.ndarray = wsi.asarray(level=level).astype(dtype)
-        if len(wsi_image.shape) < 3:
-            wsi_image = wsi_image[..., None]
+        # # Load the entire image
+        # wsi_image: np.ndarray = wsi.asarray(level=level).astype(dtype)
+        # if len(wsi_image.shape) < 3:
+        #     wsi_image = wsi_image[..., None]
             
-        if mode in "BGR": #import openCV?
-            wsi_image = wsi_image[...,::-1].copy()
-            mode = "RGB"
-            return wsi_image
+        # if mode in "BGR": #import openCV?
+        #     wsi_image = wsi_image[...,::-1].copy()
+        #     mode = "RGB"
+        #     return wsi_image
             
 
-        # Extract patch
-        downsampling_ratio = self.get_downsample_ratio(wsi=wsi, level=level)
-        location_ = [round(location[i] / downsampling_ratio) for i in range(len(location))]
-        patch = wsi_image[location_[0] : location_[0] + size[0], location_[1] : location_[1] + size[1], :].copy()
+        # # Extract patch
+        myroi = location + size
+        # print(myroi)
 
-        # Make the channel to desired dimensions
+        with pyczi.open_czi(wsi) as czidoc:
+            patch = czidoc.read(roi=myroi)
+        # downsampling_ratio = self.get_downsample_ratio(wsi=wsi, level=level)
+        # location_ = [round(location[i] / downsampling_ratio) for i in range(len(location))]
+        # patch = wsi_image[location_[0] : location_[0] + size[0], location_[1] : location_[1] + size[1], :].copy()
+
+        # # Make the channel to desired dimensions
+        # print("self.channel_dim is", self.channel_dim)
         patch = np.moveaxis(patch, -1, self.channel_dim)
 
-        # Check if the color channel is 3 (RGB) or 4 (RGBA)
-        if mode in "RGB":
-            if patch.shape[self.channel_dim] not in [3, 4]:
-                raise ValueError(
-                    f"The image is expected to have three or four color channels in '{mode}' mode but has "
-                    f"{patch.shape[self.channel_dim]}. "
-                )
-            patch = patch[:3]
+        # # Check if the color channel is 3 (RGB) or 4 (RGBA)
+        # if mode in "RGB":
+        #     if patch.shape[self.channel_dim] not in [3, 4]:
+        #         raise ValueError(
+        #             f"The image is expected to have three or four color channels in '{mode}' mode but has "
+        #             f"{patch.shape[self.channel_dim]}. "
+        #         )
+        #     patch = patch[:3]
             
        
-
+        # print("Patch shape is", patch.shape)
         return patch
-
+    
 
