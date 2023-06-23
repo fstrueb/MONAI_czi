@@ -1051,14 +1051,18 @@ class ZeissCZIWSIReader(BaseWSIReader):
         #     wsi_image = wsi_image[...,::-1].copy()
         #     mode = "RGB"
         #     return wsi_image
-            
-
-        # # Extract patch
-        myroi = location + size
-        # print(myroi)
-
+        
         with pyczi.open_czi(wsi) as czidoc:
+            dims = czidoc.total_bounding_rectangle
+            dims_orig = (dims[0], dims[1])
+            new_location = tuple(map(lambda i, j: i + j, dims_orig, location)) # perform location correction since values don't start at (0,0) for czi
+            # print(dims)
+            # print(dims[0])
+            myroi = new_location + size
+            # print("ROI for pylibczirw is", myroi)
             patch = czidoc.read(roi=myroi)
+            patch = patch[...,::-1].copy() # perform BGR to RGB conversion
+
         # downsampling_ratio = self.get_downsample_ratio(wsi=wsi, level=level)
         # location_ = [round(location[i] / downsampling_ratio) for i in range(len(location))]
         # patch = wsi_image[location_[0] : location_[0] + size[0], location_[1] : location_[1] + size[1], :].copy()
